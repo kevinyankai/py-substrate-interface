@@ -14,18 +14,18 @@ from os import path, environ
 # Python 3 only projects can skip this import
 from io import open
 
-if environ.get('TRAVIS_TAG'):
-    version = environ['TRAVIS_TAG'].replace('v', '')
-elif environ.get('CI_COMMIT_TAG'):
-    version = environ['CI_COMMIT_TAG'].replace('v', '')
-elif environ.get('GITHUB_REF'):
-
-    if not environ['GITHUB_REF'].startswith('refs/tags/v'):
-        raise ValueError('Incorrect tag format {}'.format(environ['GITHUB_REF']))
-
-    version = environ['GITHUB_REF'].replace('refs/tags/v', '')
-else:
-    raise ValueError('Missing commit tag, can\'t set version')
+# if environ.get('TRAVIS_TAG'):
+#     version = environ['TRAVIS_TAG'].replace('v', '')
+# elif environ.get('CI_COMMIT_TAG'):
+#     version = environ['CI_COMMIT_TAG'].replace('v', '')
+# elif environ.get('GITHUB_REF'):
+#
+#     if not environ['GITHUB_REF'].startswith('refs/tags/v'):
+#         raise ValueError('Incorrect tag format {}'.format(environ['GITHUB_REF']))
+#
+#     version = environ['GITHUB_REF'].replace('refs/tags/v', '')
+# else:
+#     raise ValueError('Missing commit tag, can\'t set version')
 
 here = path.abspath(path.dirname(__file__))
 
@@ -48,7 +48,7 @@ setup(
     # There are some restrictions on what makes a valid project name
     # specification here:
     # https://packaging.python.org/specifications/core-metadata/#name
-    name='substrate-interface',  # Required
+    name='py-substrate-api',  # Required
 
     # Versions should comply with PEP 440:
     # https://www.python.org/dev/peps/pep-0440/
@@ -56,7 +56,7 @@ setup(
     # For a discussion on single-sourcing the version across setup.py and the
     # project code, see
     # https://packaging.python.org/en/latest/single_source_version.html
-    version=version,  # Required
+    version='0.1.0',  # Required
 
     # This is a one-line description or tagline of what your project does. This
     # corresponds to the "Summary" metadata field:
@@ -89,15 +89,15 @@ setup(
     #
     # This field corresponds to the "Home-Page" metadata field:
     # https://packaging.python.org/specifications/core-metadata/#home-page-optional
-    url='https://github.com/polkascan/py-substrate-interface',  # Optional
+    url='https://github.com/kevinyankai/py-substrate-interface',  # Optional
 
     # This should be your name or the name of the organization which owns the
     # project.
-    author='openAware B.V.',  # Optional
+    author='Kevin',  # Optional
 
     # This should be a valid email address corresponding to the author listed
     # above.
-    author_email='legal@openaware.com',  # Optional
+    author_email='13088966264@163.com',  # Optional
 
     # Classifiers help users find your project by categorizing it.
     #

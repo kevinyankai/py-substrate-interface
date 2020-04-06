@@ -13,11 +13,11 @@ SCALE encoding/decoding (the default output and input format of the Substrate JS
 management and versioning of types.
 
 ## Documentation
-https://polkascan.github.io/py-substrate-interface/
+https://github.com/kevinyankai/py-substrate-interface
 
 ## Installation
 ```bash
-pip install substrate-interface
+pip install py-substrate-api
 ```
 
 ## Examples
