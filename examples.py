@@ -2,15 +2,14 @@ from substrateinterface import SubstrateInterface
 from substrateinterface.utils.ss58 import ss58_encode
 
 substrate = SubstrateInterface(
-    #   url="wss://kusama-rpc.polkadot.io/",
-    url="ws://103.224.250.17:3001/",
+    url="wss://kusama-rpc.polkadot.io/",
     address_type=2,
     type_registry_preset='kusama'
 )
 
 # Set block_hash to None for chaintip
-# block_hash = "0x588930468212316d8a75ede0bec0bc949451c164e2cea07ccfc425f497b077b7"
-block_hash = "0xfc8f60adedee0527800b481cc04c382f2e99a1a9d12e15e50d89d4a51e80d8c8"
+block_hash = "0x588930468212316d8a75ede0bec0bc949451c164e2cea07ccfc425f497b077b7"
+
 
 # Retrieve extrinsics in block
 result = substrate.get_runtime_block(block_hash=block_hash)

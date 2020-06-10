@@ -19,6 +19,7 @@
 import asyncio
 import binascii
 import json
+import logging
 import re
 
 import requests
@@ -30,37 +31,152 @@ from scalecodec.block import ExtrinsicsDecoder, EventsDecoder, LogDigest
 from scalecodec.metadata import MetadataDecoder
 from scalecodec.type_registry import load_type_registry_preset
 
+from .subkey import Subkey
 from .utils.hasher import blake2_256, two_x64_concat, xxh64, xxh128, blake2_128, blake2_128_concat, identity
-from .exceptions import SubstrateRequestException
+from .exceptions import SubstrateRequestException, ConfigurationError, StorageFunctionNotFound
 from .constants import *
-from .utils.ss58 import ss58_decode
+from .utils.ss58 import ss58_decode, ss58_encode
+from bip39 import bip39_to_mini_secret, bip39_generate
+import sr25519
+
+
+log = logging.getLogger(__name__)
+
+
+class Keypair:
+
+    def __init__(self, ss58_address=None, public_key=None, private_key=None, address_type=42):
+
+        if ss58_address and not public_key:
+            public_key = ss58_decode(ss58_address)
+
+        if not public_key:
+            raise ValueError('No SS58 formatted address or public key provided')
+
+        public_key = '0x{}'.format(public_key.replace('0x', ''))
+
+        if len(public_key) != 66:
+            raise ValueError('Public key should be 32 bytes long')
+
+        if not ss58_address:
+            ss58_address = ss58_encode(public_key, address_type=address_type)
+
+        self.public_key = public_key
+        self.ss58_address = ss58_address
+
+        if private_key:
+            private_key = '0x{}'.format(private_key.replace('0x', ''))
+
+            if len(private_key) != 130:
+                raise ValueError('Secret key should be 64 bytes long')
+
+        self.private_key = private_key
+        self.address_type = address_type
+
+        self.mnemonic = None
+
+    @classmethod
+    def generate_mnemonic(cls, words=12):
+        return bip39_generate(words)
+
+    @classmethod
+    def create_from_mnemonic(cls, mnemonic, address_type=42):
+        seed_array = bip39_to_mini_secret(mnemonic, "")
+
+        keypair = cls.create_from_seed(
+            seed_hex=binascii.hexlify(bytearray(seed_array)).decode("ascii"),
+            address_type=address_type
+        )
+        keypair.mnemonic = mnemonic
+
+        return keypair
+
+    @classmethod
+    def create_from_seed(cls, seed_hex, address_type=42):
+        keypair = sr25519.pair_from_seed(bytes.fromhex(seed_hex.replace('0x', '')))
+        public_key = keypair[0].hex()
+        private_key = keypair[1].hex()
+        ss58_address = ss58_encode(keypair[0], address_type)
+        return cls(ss58_address=ss58_address, public_key=public_key, private_key=private_key, address_type=address_type)
+
+    @classmethod
+    def create_from_private_key(cls, private_key, public_key=None, ss58_address=None, address_type=42):
+        return cls(ss58_address=ss58_address, public_key=public_key, private_key=private_key, address_type=address_type)
+
+    def sign(self, data):
+        """
+        Creates a sr25519 signature with give data
+
+        Parameters
+        ----------
+        data
+
+        Returns
+        -------
+        sr25519 signature
+
+        """
+        if type(data) is ScaleBytes:
+            data = bytes(data.data)
+        elif data[0:2] == '0x':
+            data = bytes.fromhex(data[2:])
+        else:
+            data = data.encode()
+
+        if not self.private_key:
+            raise ConfigurationError('No private key set to create sr25519 signatures')
+
+        signature = sr25519.sign(
+            (bytes.fromhex(self.public_key[2:]), bytes.fromhex(self.private_key[2:])),
+            data
+        )
+        return "0x{}".format(signature.hex())
+
+    def verify(self, data, signature):
+
+        if type(data) is ScaleBytes:
+            data = bytes(data.data)
+        elif data[0:2] == '0x':
+            data = bytes.fromhex(data[2:])
+        else:
+            data = data.encode()
+
+        if type(signature) is str and signature[0:2] == '0x':
+            signature = bytes.fromhex(signature[2:])
+
+        if type(signature) is not bytes:
+            raise TypeError("Signature should be of type bytes or a hex-string")
+
+        return sr25519.verify(signature, data, bytes.fromhex(self.public_key[2:]))
 
 
 class SubstrateInterface:
 
-    def __init__(self, url, address_type=None, type_registry=None, type_registry_preset=None, cache_region=None):
+    def __init__(self, url, address_type=None, type_registry=None, type_registry_preset="default", cache_region=None,
+                 sub_key: Subkey = None):
         """
         A specialized class in interfacing with a Substrate node.
 
         Parameters
         ----------
         url: the URL to the substrate node, either in format https://127.0.0.1:9933 or wss://127.0.0.1:9944
-        address_type: : The address type which account IDs will be SS58-encoded to Substrate addresses. Defaults to 42, for Kusama the address type is 2
+        address_type: The address type which account IDs will be SS58-encoded to Substrate addresses. Defaults to 42, for Kusama the address type is 2
         type_registry: A dict containing the custom type registry in format: {'types': {'customType': 'u32'},..}
         type_registry_preset: The name of the predefined type registry shipped with the SCALE-codec, e.g. kusama
         cache_region: a Dogpile cache region as a central store for the metadata cache
         """
         self.cache_region = cache_region
-        if type_registry or type_registry_preset:
 
+        if type_registry_preset:
+            # Load type registries in runtime configuration
             RuntimeConfiguration().update_type_registry(load_type_registry_preset("default"))
 
-            if type_registry:
-                # Load type registries in runtime configuration
-                RuntimeConfiguration().update_type_registry(type_registry)
-            if type_registry_preset:
-                # Load type registries in runtime configuration
+            if type_registry != "default":
                 RuntimeConfiguration().update_type_registry(load_type_registry_preset(type_registry_preset))
+
+        if type_registry:
+            # Load type registries in runtime configuration
+            RuntimeConfiguration().update_type_registry(type_registry)
 
         self.request_id = 1
         self.url = url
@@ -83,37 +199,21 @@ class SubstrateInterface:
         self.metadata_cache = {}
         self.type_registry_cache = {}
 
+        self.sub_key = sub_key
+
         self.debug = False
 
     def debug_message(self, message):
-        if self.debug:
-            print('DEBUG', message)
+        log.debug(message)
 
-    async def ws_request(self, payload):
-        """
-        Internal method to handle the request if url is a websocket address (wss:// or ws://)
-
-        Parameters
-        ----------
-        payload: a dict that contains the JSONRPC payload of the request
-
-        Returns
-        -------
-        This method doesn't return but sets the `_ws_result` object variable with the result
-        """
-        async with websockets.connect(
-                self.url
-        ) as websocket:
-            await websocket.send(json.dumps(payload))
-            self._ws_result = json.loads(await websocket.recv())
-
-    def rpc_request(self, method, params):
+    def rpc_request(self, method, params, result_handler=None):
         """
         Method that handles the actual RPC request to the Substrate node. The other implemented functions eventually
         use this method to perform the request.
 
         Parameters
         ----------
+        result_handler: Callback of function that processes the result received from the node
         method: method of the JSONRPC request
         params: a list containing the parameters of the JSONRPC request
 
@@ -131,10 +231,51 @@ class SubstrateInterface:
         self.debug_message('RPC request "{}"'.format(method))
 
         if self.url[0:6] == 'wss://' or self.url[0:5] == 'ws://':
-            asyncio.get_event_loop().run_until_complete(self.ws_request(payload))
-            json_body = self._ws_result
+            ws_result = {}
+
+            async def ws_request(ws_payload):
+                """
+                Internal method to handle the request if url is a websocket address (wss:// or ws://)
+
+                Parameters
+                ----------
+                ws_payload: a dict that contains the JSONRPC payload of the request
+
+                Returns
+                -------
+                This method doesn't return but updates the `ws_result` object variable with the result
+                """
+                async with websockets.connect(
+                        self.url
+                ) as websocket:
+                    await websocket.send(json.dumps(ws_payload))
+
+                    if callable(result_handler):
+                        event_number = 0
+                        while not ws_result:
+                            result = json.loads(await websocket.recv())
+                            self.debug_message("Websocket result [{}] Received from node: {}".format(event_number, result))
+
+                            # Check if response has error
+                            if 'error' in result:
+                                raise SubstrateRequestException(result['error'])
+
+                            callback_result = result_handler(result)
+                            if callback_result:
+                                ws_result.update(callback_result)
+
+                            event_number += 1
+                    else:
+                        ws_result.update(json.loads(await websocket.recv()))
+
+            asyncio.run(ws_request(payload))
+            json_body = ws_result
 
         else:
+
+            if result_handler:
+                raise ConfigurationError("Result handlers only available for websockets (ws://) connections")
+
             response = requests.request("POST", self.url, data=json.dumps(payload), headers=self.default_headers)
 
             if response.status_code != 200:
@@ -643,7 +784,7 @@ class SubstrateInterface:
                                 raise NotImplementedError("Storage type not implemented")
 
                             storage_hash = self.generate_storage_hash(
-                                storage_module=module,
+                                storage_module=metadata_module.prefix,
                                 storage_function=storage_function,
                                 params=params,
                                 hasher=hasher,
@@ -665,7 +806,7 @@ class SubstrateInterface:
 
                             return response
 
-        raise ValueError('Storage function "{}.{}" not found'.format(module, storage_function))
+        raise StorageFunctionNotFound('Storage function "{}.{}" not found'.format(module, storage_function))
 
     def get_runtime_events(self, block_hash=None):
         """
@@ -725,15 +866,186 @@ class SubstrateInterface:
         """
         self.init_runtime(block_hash=block_hash)
 
-        extrinsic = ExtrinsicsDecoder(metadata=self.metadata_decoder, address_type=self.address_type)
+        call = ScaleDecoder.get_decoder_class('Call', metadata=self.metadata_decoder)
 
-        payload = extrinsic.encode({
+        call.encode({
             'call_module': call_module,
             'call_function': call_function,
             'call_args': call_params
         })
 
-        return str(payload)
+        return call
+
+    def get_account_nonce(self, account_address):
+        response = self.get_runtime_state('System', 'Account', [account_address])
+        if response.get('result'):
+            return response['result'].get('nonce', 0)
+
+    def verify_data(self, data):
+        pass
+
+    def generate_signature_payload(self, call, era=None, nonce=0, tip=0, include_call_length=False):
+
+        # Retrieve genesis hash
+        genesis_hash = self.get_block_hash(0)
+
+        if era:
+            if era != '00':
+                # TODO implement MortalEra transactions
+                raise NotImplementedError("Mortal transactions not yet implemented")
+        else:
+            era = '00'
+
+        # Create signature payload
+        signature_payload = ScaleDecoder.get_decoder_class('ExtrinsicPayloadValue')
+
+        if include_call_length:
+
+            length_obj = RuntimeConfiguration().get_decoder_class('Bytes')
+            call_data = str(length_obj().encode(str(call.data)))
+
+        else:
+            call_data = str(call.data)
+
+        signature_payload.encode({
+            'call': call_data,
+            'era': era,
+            'nonce': nonce,
+            'tip': tip,
+            'specVersion': self.runtime_version,
+            'genesisHash': genesis_hash,
+            'blockHash': genesis_hash
+        })
+
+        return signature_payload.data
+
+    def create_signed_extrinsic(self, call, keypair: Keypair, era=None, nonce=None, tip=0, signature=None):
+        """
+        Creates a extrinsic signed by given account details
+
+        Parameters
+        ----------
+        signature
+        era
+        keypair
+        call
+        nonce
+        tip
+
+        Returns
+        -------
+        ExtrinsicsDecoder The signed Extrinsic
+        """
+
+        # Check requirements
+        if call.__class__.__name__ != 'Call':
+            raise TypeError("'call' must be of type Call")
+
+        # Retrieve nonce
+        if not nonce:
+            nonce = self.get_account_nonce(keypair.public_key) or 0
+
+        if era:
+            if era != '00':
+                # TODO implement MortalEra transactions
+                raise NotImplementedError("Mortal transactions not yet implemented")
+        else:
+            era = '00'
+
+        if not signature:
+            # Create signature payload
+            signature_payload = self.generate_signature_payload(call=call, era=era, nonce=nonce, tip=tip)
+
+            # Sign payload
+            signature = keypair.sign(signature_payload)
+
+        # Create extrinsic
+        extrinsic = ScaleDecoder.get_decoder_class('Extrinsic', metadata=self.metadata_decoder)
+
+        extrinsic.encode({
+            'account_id': keypair.public_key,
+            'signature_version': 1,
+            'signature': signature,
+            'call_function': call.value['call_function'],
+            'call_module': call.value['call_module'],
+            'call_args': call.value['call_args'],
+            'nonce': nonce,
+            'era': era,
+            'tip': tip
+        })
+
+        # Set extrinsic hash
+        extrinsic.extrinsic_hash = extrinsic.generate_hash()
+
+        return extrinsic
+
+    def create_unsigned_extrinsic(self, call):
+        # Create extrinsic
+        extrinsic = ScaleDecoder.get_decoder_class('Extrinsic', metadata=self.metadata_decoder)
+
+        extrinsic.encode({
+            'call_function': call.value['call_function'],
+            'call_module': call.value['call_module'],
+            'call_args': call.value['call_args']
+        })
+
+        return extrinsic
+
+    def send_extrinsic(self, extrinsic, wait_for_inclusion=False, wait_for_finalization=False):
+        """
+
+        Parameters
+        ----------
+        extrinsic: ExtrinsicsDecoder The extinsic to be send to the network
+        wait_for_inclusion: wait until extrinsic is included in a block (only works on websocket connections)
+        wait_for_finalization: wait until extrinsic is finalized (only works on websocket connections)
+
+        Returns
+        -------
+        The hash of the extrinsic submitted to the network
+
+        """
+
+        # Check requirements
+        if extrinsic.__class__.__name__ != 'ExtrinsicsDecoder':
+            raise TypeError("'extrinsic' must be of type ExtrinsicsDecoder")
+
+        def result_handler(result):
+            # Check if extrinsic is included and finalized
+            if 'params' in result and type(result['params']['result']) is dict:
+                if 'finalized' in result['params']['result'] and wait_for_finalization:
+                    return {
+                        'block_hash': result['params']['result']['finalized'],
+                        'extrinsic_hash': '0x{}'.format(extrinsic.extrinsic_hash),
+                        'finalized': True
+                    }
+                elif 'inBlock' in result['params']['result'] and wait_for_inclusion and not wait_for_finalization:
+                    return {
+                        'block_hash': result['params']['result']['inBlock'],
+                        'extrinsic_hash': '0x{}'.format(extrinsic.extrinsic_hash),
+                        'finalized': False
+                    }
+
+        if wait_for_inclusion or wait_for_finalization:
+            response = self.rpc_request(
+                "author_submitAndWatchExtrinsic",
+                [str(extrinsic.data)],
+                result_handler=result_handler
+            )
+        else:
+
+            response = self.rpc_request("author_submitExtrinsic", [str(extrinsic.data)])
+
+            if 'result' not in response:
+                raise SubstrateRequestException(response.get('error'))
+
+            response = {
+                'extrinsic_hash': response['result'],
+                'block_hash': None,
+                'finalized': None
+            }
+
+        return response
 
     def process_metadata_typestring(self, type_string):
         """

@@ -78,43 +78,83 @@ The modules and storage functions are provided in the metadata (see `substrate.g
 parameters will be automatically converted to SCALE-bytes (also including decoding of SS58 addresses).   
 
 ```python
-print("\n\nCurrent balance: {} DOT".format(
-    substrate.get_runtime_state(
-        module='Balances',
-        storage_function='FreeBalance',
-        params=['EaG2CRhJWPb7qmdcJvy3LiWdh26Jreu9Dx6R1rXxPmYXoDk']
-    ).get('result') / 10**12
-))
+balance_info = substrate.get_runtime_state(
+    module='System',
+    storage_function='Account',
+    params=['5E9oDs9PjpsBbxXxRE9uMaZZhnBAV38n2ouLB28oecBDdeQo']
+).get('result')
+
+if balance_info:
+    print("\n\nCurrent free balance: {} KSM".format(
+        balance_info.get('data').get('free', 0) / 10**12
+    ))
 ```
 
 Or get a historic balance at a certain block hash:
 
 ```python
-print("Balance @ {}: {} DOT".format(
-    block_hash, 
-    substrate.get_runtime_state(
-        module='Balances',
-        storage_function='FreeBalance',
-        params=['EaG2CRhJWPb7qmdcJvy3LiWdh26Jreu9Dx6R1rXxPmYXoDk'],
-        block_hash=block_hash
-    ).get('result') / 10**12
-))
+balance_info = substrate.get_runtime_state(
+    module='System',
+    storage_function='Account',
+    params=['5E9oDs9PjpsBbxXxRE9uMaZZhnBAV38n2ouLB28oecBDdeQo'],
+    block_hash=block_hash
+).get('result')
+
+if balance_info:
+    print("\n\nFree balance @ {}: {} KSM".format(
+        block_hash,
+        balance_info.get('data').get('free', 0) / 10**12
+    ))
 ```
 
-### Compose call
+### Create and send signed extrinsics
 
-Py-substrate-interface will also let you compose calls you can use as an unsigned extrinsic or as a proposal:
+The following code snippet illustrates how to create a call, wrap it in an signed extrinsic and send it to the network:
 
 ```python
-payload = substrate.compose_call(
+from substrateinterface import SubstrateInterface, SubstrateRequestException, Keypair
+
+substrate = SubstrateInterface(
+    url="ws://127.0.0.1:9944",
+    address_type=42,
+    type_registry_preset='kusama'
+)
+
+keypair = Keypair.create_from_mnemonic('episode together nose spoon dose oil faculty zoo ankle evoke admit walnut')
+
+call = substrate.compose_call(
     call_module='Balances',
     call_function='transfer',
     call_params={
-        'dest': 'EaG2CRhJWPb7qmdcJvy3LiWdh26Jreu9Dx6R1rXxPmYXoDk',
-        'value': 1000000000000
+        'dest': '5E9oDs9PjpsBbxXxRE9uMaZZhnBAV38n2ouLB28oecBDdeQo',
+        'value': 1 * 10**12
     }
 )
+
+extrinsic = substrate.create_signed_extrinsic(call=call, keypair=keypair)
+
+try:
+    result = substrate.send_extrinsic(extrinsic, wait_for_inclusion=True)
+    print("Extrinsic '{}' sent and included in block '{}'".format(result['extrinsic_hash'], result['block_hash']))
+
+except SubstrateRequestException as e:
+    print("Failed to send: {}".format(e))
+
 ```
+
+### Keypair creation and signing
+
+```python
+
+mnemonic = Keypair.generate_mnemonic()
+keypair = Keypair.create_from_mnemonic(mnemonic)
+signature = keypair.sign("Test123")
+if keypair.verify("Test123", signature):
+    print('Verified')
+```
+
+
+### Metadata and type versioning
 
 Py-substrate-interface makes it also possible to easily interprete changed types and historic runtimes. As an example
 we create an (not very useful) historic call of a module that has been removed later on: retrieval of historic metadata and 
