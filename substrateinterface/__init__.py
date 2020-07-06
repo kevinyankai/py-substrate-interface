@@ -40,7 +40,7 @@ from bip39 import bip39_to_mini_secret, bip39_generate
 import sr25519
 
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class Keypair:
@@ -193,8 +193,12 @@ class SubstrateInterface:
         }
 
         self.metadata_decoder = None
+
         self.runtime_version = None
+        self.transaction_version = None
+
         self.block_hash = None
+        self.block_id = None
 
         self.metadata_cache = {}
         self.type_registry_cache = {}
@@ -204,7 +208,7 @@ class SubstrateInterface:
         self.debug = False
 
     def debug_message(self, message):
-        log.debug(message)
+        logger.debug(message)
 
     def rpc_request(self, method, params, result_handler=None):
         """
@@ -580,7 +584,7 @@ class SubstrateInterface:
 
         """
 
-        if metadata_version and metadata_version >= 9:
+        if not metadata_version or metadata_version >= 9:
             storage_hash = xxh128(storage_module.encode()) + xxh128(storage_function.encode())
 
             if params:
@@ -681,12 +685,24 @@ class SubstrateInterface:
         if block_id and block_hash:
             raise ValueError('Cannot provide block_hash and block_id at the same time')
 
+        # Check if runtime state already set to current block
+        if (block_hash and block_hash == self.block_hash) or (block_id and block_id == self.block_id):
+            return
+
         if block_id:
             block_hash = self.get_block_hash(block_id)
 
         self.block_hash = block_hash
+        self.block_id = block_id
 
-        self.runtime_version = self.get_block_runtime_version(block_hash=self.block_hash).get("specVersion")
+        runtime_info = self.get_block_runtime_version(block_hash=self.block_hash)
+
+        # Check if runtime state already set to current block
+        if runtime_info.get("specVersion") == self.runtime_version:
+            return
+
+        self.runtime_version = runtime_info.get("specVersion")
+        self.transaction_version = runtime_info.get("transactionVersion")
 
         # Set active runtime version
         RuntimeConfiguration().set_active_spec_version_id(self.runtime_version)
@@ -881,9 +897,6 @@ class SubstrateInterface:
         if response.get('result'):
             return response['result'].get('nonce', 0)
 
-    def verify_data(self, data):
-        pass
-
     def generate_signature_payload(self, call, era=None, nonce=0, tip=0, include_call_length=False):
 
         # Retrieve genesis hash
@@ -907,7 +920,7 @@ class SubstrateInterface:
         else:
             call_data = str(call.data)
 
-        signature_payload.encode({
+        payload_dict = {
             'call': call_data,
             'era': era,
             'nonce': nonce,
@@ -915,7 +928,12 @@ class SubstrateInterface:
             'specVersion': self.runtime_version,
             'genesisHash': genesis_hash,
             'blockHash': genesis_hash
-        })
+        }
+
+        if self.transaction_version is not None:
+            payload_dict['transactionVersion'] = self.transaction_version
+
+        signature_payload.encode(payload_dict)
 
         return signature_payload.data
 
@@ -952,9 +970,23 @@ class SubstrateInterface:
         else:
             era = '00'
 
-        if not signature:
+        if signature:
+
+            signature = signature.replace('0x', '')
+
+            # Check if signature is a MultiSignature and contains signature version
+            if len(signature) == 130:
+                signature_version = int(signature[0:2], 16)
+                signature = '0x{}'.format(signature[2:])
+            else:
+                signature_version = 1
+
+        else:
             # Create signature payload
             signature_payload = self.generate_signature_payload(call=call, era=era, nonce=nonce, tip=tip)
+
+            # Set Signature version to sr25519
+            signature_version = 1
 
             # Sign payload
             signature = keypair.sign(signature_payload)
@@ -964,7 +996,7 @@ class SubstrateInterface:
 
         extrinsic.encode({
             'account_id': keypair.public_key,
-            'signature_version': 1,
+            'signature_version': signature_version,
             'signature': signature,
             'call_function': call.value['call_function'],
             'call_module': call.value['call_module'],
@@ -991,7 +1023,7 @@ class SubstrateInterface:
 
         return extrinsic
 
-    def send_extrinsic(self, extrinsic, wait_for_inclusion=False, wait_for_finalization=False):
+    def submit_extrinsic(self, extrinsic, wait_for_inclusion=False, wait_for_finalization=False):
         """
 
         Parameters
